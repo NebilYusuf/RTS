@@ -3,21 +3,25 @@
 #include <stdlib.h>
 #include <time.h>
 
-#define N 100000                     // Number of sensor points (Elios 3 LiDAR-scale)
-#define DIM 4                        // 3D + homogeneous coord
-#define CONTROL_LOOP_BUDGET_MS 10.0  // PX4 attitude loop at 100 Hz
-#define SUBSYSTEM_OVERHEAD_MS 3.9    // Sensor + Filter + Control + Comm
-#define CYCLES 10                    // Number of control loop iterations
-#define SPIKE_JITTER_MS 2.0          // Optional processing spike for 1 out of 10 cycles
+#define N 100000
+#define DIM 4
+#define CONTROL_LOOP_BUDGET_MS 10.0
+#define SUBSYSTEM_OVERHEAD_MS 3.9
+#define FORCED_DELAY_MS 1.5
+#define CYCLES 10
 
-// Simulate sensor transformation: B * Aᵀ = C
+// === UNOPTIMIZED CODE: Reflecting Chapter 12 Anti-Patterns ===
+
+// Redundant computation, memory access pattern issues, branching, no unrolling
 void transform_sensor_points(float B[N][DIM], float A[DIM][DIM], float C[N][DIM]) {
     for (int i = 0; i < N; i++) {
         for (int j = 0; j < DIM; j++) {
             C[i][j] = 0.0f;
             for (int k = 0; k < DIM; k++) {
-                float val = B[i][k];  // Intentional inefficient memory access
-                C[i][j] += val * A[k][j];
+                // Inefficient access: repeatedly loading from memory
+                float temp = B[i][k];
+                if (temp > 1.0f) temp *= 0.99f;  // Unpredictable branch
+                C[i][j] += temp * A[k][j];
             }
         }
     }
@@ -28,16 +32,21 @@ double get_elapsed_ms(struct timespec start, struct timespec end) {
            (end.tv_nsec - start.tv_nsec) / 1e6;
 }
 
+void sleep_for_ms(double ms) {
+    struct timespec delay;
+    delay.tv_sec = 0;
+    delay.tv_nsec = (long)(ms * 1e6);
+    nanosleep(&delay, NULL);
+}
+
 int main() {
     float B[N][DIM], C[N][DIM], A[DIM][DIM];
-    struct timespec start, end;
+    struct timespec t_start, t_end;
 
-    // Initialize transformation matrix A (slightly perturbed identity)
     for (int i = 0; i < DIM; i++)
         for (int j = 0; j < DIM; j++)
             A[i][j] = (i == j) ? 1.0f : 0.1f * (i + j);
 
-    // Initialize sensor points (x, y, z, 1)
     for (int i = 0; i < N; i++) {
         B[i][0] = i * 0.001f;
         B[i][1] = i * 0.002f;
@@ -45,33 +54,23 @@ int main() {
         B[i][3] = 1.0f;
     }
 
-    printf("=== Simulated Elios 3 PX4 Attitude Loop (%d Cycles) ===\n", CYCLES);
-    printf("Subsystems = Sensor+Filter+Control+Comm (%.1fms)\n", SUBSYSTEM_OVERHEAD_MS);
-    printf("Loop Budget = %.1fms | ±0.5ms jitter | 1/10 spike = +%.1fms\n\n",
-           CONTROL_LOOP_BUDGET_MS, SPIKE_JITTER_MS);
+    printf("=== PX4 Loop Simulation (Unoptimized, Chapter 12 Anti-Patterns) ===\n");
+    printf("Sensor Points: %d | Overhead: %.1f ms | Forced Delay: %.1f ms\n", N, SUBSYSTEM_OVERHEAD_MS, FORCED_DELAY_MS);
+    printf("Budget: %.1f ms | Cycles: %d\n\n", CONTROL_LOOP_BUDGET_MS, CYCLES);
 
     for (int cycle = 0; cycle < CYCLES; cycle++) {
-        clock_gettime(CLOCK_MONOTONIC, &start);
+        clock_gettime(CLOCK_MONOTONIC, &t_start);
         transform_sensor_points(B, A, C);
-        clock_gettime(CLOCK_MONOTONIC, &end);
+        clock_gettime(CLOCK_MONOTONIC, &t_end);
+        double transform_time = get_elapsed_ms(t_start, t_end);
 
-        double transform_time = get_elapsed_ms(start, end);
-        double total_time = transform_time + SUBSYSTEM_OVERHEAD_MS;
+        sleep_for_ms(FORCED_DELAY_MS);
 
-        // Inject artificial 1-in-10 spike
-        int is_spike = (cycle == 9);  // Last cycle
-        if (is_spike) {
-            total_time += SPIKE_JITTER_MS;
-        }
+        double total_time = transform_time + FORCED_DELAY_MS + SUBSYSTEM_OVERHEAD_MS;
+        int met = total_time <= CONTROL_LOOP_BUDGET_MS;
 
-        int met_deadline = total_time <= CONTROL_LOOP_BUDGET_MS;
-
-        printf("Cycle %2d | Transform: %5.2f ms | Total: %5.2f ms | %s%s\n",
-               cycle + 1,
-               transform_time,
-               total_time,
-               met_deadline ? "✅ Met  " : "⚠️  Miss",
-               is_spike ? " (+Spike)" : "");
+        printf("Cycle %2d | Transform: %5.2f ms | Delay: %4.2f ms | Total: %5.2f ms | %s\n",
+               cycle + 1, transform_time, FORCED_DELAY_MS, total_time, met ? "\xE2\x9C\x85 Met" : "\xE2\x9A\xA0 Miss");
     }
 
     return 0;

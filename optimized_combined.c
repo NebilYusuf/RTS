@@ -1,0 +1,95 @@
+#define _POSIX_C_SOURCE 199309L
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+
+#define N 100000
+#define DIM 4
+#define CONTROL_LOOP_BUDGET_MS 10.0
+#define SUBSYSTEM_OVERHEAD_MS 3.9
+#define FORCED_DELAY_MS 1.5
+#define CYCLES 10
+
+// === OPTIMIZED VERSION: Applied All Cheng Chapter 12 Techniques ===
+// - Removed unpredictable branches
+// - Minimized redundant computations (cached B[i][k])
+// - Applied compiler optimization hint (-O3)
+// - Manually unrolled loop over 'k'
+// - Transposed matrix A for better memory access locality
+
+void transform_sensor_points_optimized(float B[N][DIM], float A[DIM][DIM], float C[N][DIM]) {
+    float A_T[DIM][DIM];
+    
+    // Transpose matrix A for better memory access pattern
+    for (int i = 0; i < DIM; i++) {
+        for (int j = 0; j < DIM; j++) {
+            A_T[j][i] = A[i][j];
+        }
+    }
+
+    for (int i = 0; i < N; i++) {
+        // Cache B[i][k] outside inner loop (redundant computation)
+        float b0 = B[i][0];
+        float b1 = B[i][1];
+        float b2 = B[i][2];
+        float b3 = B[i][3];
+
+        // Removed unpredictable branch: if (temp > 1.0f)
+
+        // Loop unrolling over k
+        for (int j = 0; j < DIM; j++) {
+            C[i][j] = b0 * A_T[j][0] + b1 * A_T[j][1] + b2 * A_T[j][2] + b3 * A_T[j][3];
+        }
+    }
+}
+
+double get_elapsed_ms(struct timespec start, struct timespec end) {
+    return (end.tv_sec - start.tv_sec) * 1000.0 +
+           (end.tv_nsec - start.tv_nsec) / 1e6;
+}
+
+void sleep_for_ms(double ms) {
+    struct timespec delay;
+    delay.tv_sec = 0;
+    delay.tv_nsec = (long)(ms * 1e6);
+    nanosleep(&delay, NULL);
+}
+
+int main() {
+    float B[N][DIM], C[N][DIM], A[DIM][DIM];
+    struct timespec t_start, t_end;
+
+    // Initialize matrix A (original)
+    for (int i = 0; i < DIM; i++)
+        for (int j = 0; j < DIM; j++)
+            A[i][j] = (i == j) ? 1.0f : 0.1f * (i + j);
+
+    // Initialize matrix B
+    for (int i = 0; i < N; i++) {
+        B[i][0] = i * 0.001f;
+        B[i][1] = i * 0.002f;
+        B[i][2] = i * 0.003f;
+        B[i][3] = 1.0f;
+    }
+
+    printf("=== PX4 Loop Simulation (Optimized: Cheng Ch. 12 Applied) ===\n");
+    printf("Sensor Points: %d | Overhead: %.1f ms | Forced Delay: %.1f ms\n", N, SUBSYSTEM_OVERHEAD_MS, FORCED_DELAY_MS);
+    printf("Budget: %.1f ms | Cycles: %d\n\n", CONTROL_LOOP_BUDGET_MS, CYCLES);
+
+    for (int cycle = 0; cycle < CYCLES; cycle++) {
+        clock_gettime(CLOCK_MONOTONIC, &t_start);
+        transform_sensor_points_optimized(B, A, C);
+        clock_gettime(CLOCK_MONOTONIC, &t_end);
+        double transform_time = get_elapsed_ms(t_start, t_end);
+
+        sleep_for_ms(FORCED_DELAY_MS);
+
+        double total_time = transform_time + FORCED_DELAY_MS + SUBSYSTEM_OVERHEAD_MS;
+        int met = total_time <= CONTROL_LOOP_BUDGET_MS;
+
+        printf("Cycle %2d | Transform: %5.2f ms | Delay: %4.2f ms | Total: %5.2f ms | %s\n",
+               cycle + 1, transform_time, FORCED_DELAY_MS, total_time, met ? "\xE2\x9C\x85 Met" : "\xE2\x9A\xA0 Miss");
+    }
+
+    return 0;
+}
